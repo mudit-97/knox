@@ -17,6 +17,12 @@
  */
 package org.apache.knox.gateway.dispatch;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.collections.MapUtils;
+import org.apache.http.client.methods.HttpUriRequest;
+import org.apache.knox.gateway.audit.api.ActionOutcome;
 import org.apache.knox.gateway.config.Configure;
 import org.apache.knox.gateway.config.Default;
 import org.apache.knox.gateway.util.StringUtils;
@@ -26,11 +32,12 @@ import java.io.UnsupportedEncodingException;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
-import java.util.Optional;
+import java.util.Map;
 import java.util.Set;
+import java.util.Arrays;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 /**
@@ -41,11 +48,24 @@ import java.util.stream.Collectors;
 public class ConfigurableDispatch extends DefaultDispatch {
   private Set<String> requestExcludeHeaders = super.getOutboundRequestExcludeHeaders();
   private Set<String> responseExcludeHeaders = super.getOutboundResponseExcludeHeaders();
+  private Map<String, String> requestAppendHeaders = Collections.emptyMap();
   private Set<String> responseExcludeSetCookieHeaderDirectives = super.getOutboundResponseExcludedSetCookieHeaderDirectives();
   private Boolean removeUrlEncoding = false;
 
   private Set<String> convertCommaDelimitedHeadersToSet(String headers) {
     return headers == null ?  Collections.emptySet(): new HashSet<>(Arrays.asList(headers.split("\\s*,\\s*")));
+  }
+
+  private Map<String, String> convertJSONHeadersToMap(String headers) {
+    if(null == headers){
+      return Collections.emptyMap();
+    }
+    try {
+      return (new ObjectMapper()).readValue(headers, new TypeReference<Map<String, String>>(){});
+    } catch (JsonProcessingException e) {
+      auditor.audit("deserialize headers", headers, "header", ActionOutcome.FAILURE, e.getMessage());
+      return Collections.emptyMap();
+    }
   }
 
   @Configure
@@ -61,6 +81,13 @@ public class ConfigurableDispatch extends DefaultDispatch {
       final Set<String> headerSet = convertCommaDelimitedHeadersToSet(headers);
       populateSetCookieHeaderDirectiveExlusions(headerSet);
       populateHttpHeaderExlusionsOtherThanSetCookie(headerSet);
+    }
+  }
+
+  @Configure
+  protected void setRequestAppendHeaders(@Default(" ") String extraHeaders) {
+    if(!" ".equals(extraHeaders)) {
+      this.requestAppendHeaders = convertJSONHeadersToMap(extraHeaders);
     }
   }
 
@@ -91,6 +118,18 @@ public class ConfigurableDispatch extends DefaultDispatch {
   }
 
   @Override
+  public void copyRequestHeaderFields(HttpUriRequest outboundRequest,
+                                      HttpServletRequest inboundRequest) {
+    super.copyRequestHeaderFields(outboundRequest, inboundRequest);
+
+    //If there are some headers to be appended, append them
+    Map<String, String> extraHeaders = getOutboundRequestAppendHeaders();
+    if(MapUtils.isNotEmpty(extraHeaders)){
+      extraHeaders.forEach(outboundRequest::addHeader);
+    }
+  }
+
+  @Override
   public Set<String> getOutboundResponseExcludeHeaders() {
     return responseExcludeHeaders == null ? Collections.emptySet() : responseExcludeHeaders;
   }
@@ -103,6 +142,10 @@ public class ConfigurableDispatch extends DefaultDispatch {
   @Override
   public Set<String> getOutboundRequestExcludeHeaders() {
     return requestExcludeHeaders == null ? Collections.emptySet() : requestExcludeHeaders;
+  }
+
+  public Map<String, String> getOutboundRequestAppendHeaders() {
+    return requestAppendHeaders == null ? Collections.emptyMap() : requestAppendHeaders;
   }
 
   public boolean getRemoveUrlEncoding() {
